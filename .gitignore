@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+dist/
+.vs/
+*.user
+*.log
+.env
+.env.*
+**/data/
+# Earlier local implementations are retained only on this machine.
+src/ThemeShift/
+src/ThemeShift.Local/
+tests/ThemeShift.Tests/
+tests/ThemeShift.Local.Tests/
