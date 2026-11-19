@@ -139,21 +139,78 @@ namespace SwitchTheme
     }
     public sealed class UiDispatcher : NativeWindow, IDisposable
     {
+        private const int WmTimeChange = 0x001E, WmPowerBroadcast = 0x0218, WmSessionChange = 0x02B1;
+        private const int ResumeSuspend = 7, ResumeAutomatic = 18, PowerSettingChange = 0x8013;
+        private const int SessionUnlock = 8, DisplayOn = 1;
+        private static readonly Guid SessionDisplayStatus = new Guid("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PowerSettingHeader
+        {
+            public Guid Setting;
+            public uint DataLength;
+        }
+
         private readonly ConcurrentQueue<Action> queue = new ConcurrentQueue<Action>();
         private readonly Action<Exception> error; private volatile bool disposed;
-        public Action SystemClockChanged;
+        private readonly IntPtr displayNotification;
+        private readonly bool sessionNotification;
+        public Action ScheduleInvalidated;
+
         public UiDispatcher(Action<Exception> error)
-        { this.error = error; CreateHandle(new CreateParams { Caption = "ThemeShift.Dispatcher" }); }
+        {
+            this.error = error;
+            CreateHandle(new CreateParams { Caption = "ThemeShift.Dispatcher" });
+            var displaySetting = SessionDisplayStatus;
+            displayNotification = RegisterPowerSettingNotification(Handle, ref displaySetting, 0 /* DEVICE_NOTIFY_WINDOW_HANDLE */);
+            if (displayNotification == IntPtr.Zero && error != null)
+                error(new Win32Exception(Marshal.GetLastWin32Error(), "无法监听 Windows 亮屏通知。"));
+            sessionNotification = WTSRegisterSessionNotification(Handle, 0 /* NOTIFY_FOR_THIS_SESSION */);
+            if (!sessionNotification && error != null)
+                error(new Win32Exception(Marshal.GetLastWin32Error(), "无法监听 Windows 解锁通知。"));
+        }
+
         public void Post(Action action) { if (disposed) return; queue.Enqueue(action); PostMessage(Handle, 0x802a, IntPtr.Zero, IntPtr.Zero); }
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == 0x802a)
             { Action action; while (queue.TryDequeue(out action)) { if (!disposed) try { action(); } catch (Exception ex) { error(ex); } } }
-            else if (message.Msg == 0x1e || (message.Msg == 0x218 && (message.WParam.ToInt64() == 7 || message.WParam.ToInt64() == 18)))
-            { if (SystemClockChanged != null) SystemClockChanged(); }
+            else if (!disposed && ScheduleInvalidated != null && ShouldRecheckSchedule(message))
+            { ScheduleInvalidated(); }
             base.WndProc(ref message);
         }
-        public void Dispose() { disposed = true; DestroyHandle(); }
+
+        private static bool ShouldRecheckSchedule(Message message)
+        {
+            var eventType = message.WParam.ToInt64();
+            if (message.Msg == WmTimeChange) return true;
+            if (message.Msg == WmSessionChange) return eventType == SessionUnlock;
+            if (message.Msg != WmPowerBroadcast) return false;
+            if (eventType == ResumeAutomatic || eventType == ResumeSuspend) return true;
+            if (eventType != PowerSettingChange || message.LParam == IntPtr.Zero) return false;
+
+            var setting = (PowerSettingHeader)Marshal.PtrToStructure(message.LParam, typeof(PowerSettingHeader));
+            return setting.Setting == SessionDisplayStatus && setting.DataLength == sizeof(int) &&
+                Marshal.ReadInt32(message.LParam, Marshal.SizeOf(typeof(PowerSettingHeader))) == DisplayOn;
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            if (sessionNotification) WTSUnRegisterSessionNotification(Handle);
+            if (displayNotification != IntPtr.Zero) UnregisterPowerSettingNotification(displayNotification);
+            DestroyHandle();
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr RegisterPowerSettingNotification(IntPtr window, ref Guid setting, uint flags);
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterPowerSettingNotification(IntPtr notification);
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        private static extern bool WTSRegisterSessionNotification(IntPtr window, uint flags);
+        [DllImport("wtsapi32.dll")]
+        private static extern bool WTSUnRegisterSessionNotification(IntPtr window);
         [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
     }
 }

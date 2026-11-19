@@ -99,7 +99,7 @@ namespace SwitchTheme
             if (resume != null) { DraftCache = resume.Draft; PausedUntil = resume.PausedUntil; }
             theme = new WindowsTheme(ex => Store.Log(ex.ToString()));
             ui = new UiDispatcher(ex => Store.Log(ex.ToString()));
-            ui.SystemClockChanged = delegate { TimeZoneInfo.ClearCachedData(); Tick(); };
+            ui.ScheduleInvalidated = delegate { TimeZoneInfo.ClearCachedData(); Tick(); };
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico")) icon = new System.Drawing.Icon(stream);
             trayIcon = AppIcons.CreateTrayIcon();
             var menu = new ContextMenuStrip();

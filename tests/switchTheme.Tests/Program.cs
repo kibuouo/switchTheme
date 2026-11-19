@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ class LocalTests
     { if (!result) throw new Exception("FAIL: " + label); passed++; Console.WriteLine("PASS: " + label); }
     private static DateTimeOffset At(int hour, int minute = 0)
     { return new DateTimeOffset(2026, 10, 7, hour, minute, 0, TimeSpan.FromHours(8)); }
+    [STAThread]
     private static void Main()
     {
         var zone = TimeZoneInfo.CreateCustomTimeZone("Test China", TimeSpan.FromHours(8), "Test China", "Test China");
@@ -28,6 +30,7 @@ class LocalTests
         settings.Enabled = true;
         Check(Scheduler.NextCheckDelay(settings, At(8), zone, null, default(DateTimeOffset), true) == TimeSpan.FromHours(11), "timer sleeps until next evening boundary");
         Check(Scheduler.NextCheckDelay(settings, At(19), zone, null, default(DateTimeOffset), true) == TimeSpan.FromHours(12), "exact boundary arms next day morning");
+        CheckModernStandbyCatchUp(settings, zone);
         Check(Scheduler.NextCheckDelay(settings, At(18, 59).AddSeconds(59.5), zone, null, default(DateTimeOffset), true) == TimeSpan.FromMilliseconds(500), "timer retains subsecond remainder");
         Check(Scheduler.NextCheckDelay(settings, At(8), zone, At(9), default(DateTimeOffset), true) == TimeSpan.FromHours(1), "one hour pause arms its expiry");
         Check(Scheduler.NextCheckDelay(settings, At(18), zone, At(20), default(DateTimeOffset), true) == TimeSpan.FromHours(2), "pause spanning a boundary holds until expiry");
@@ -144,4 +147,37 @@ class LocalTests
         finally { Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(testPath, false); }
         Console.WriteLine(passed + " local checks passed.");
     }
+
+    private static void CheckModernStandbyCatchUp(Settings settings, TimeZoneInfo zone)
+    {
+        var current = Scheduler.Evaluate(settings, At(6, 59), zone).Current;
+        var checks = 0;
+        using (var dispatcher = new UiDispatcher(null))
+        {
+            dispatcher.ScheduleInvalidated = delegate { checks++; current = Scheduler.Evaluate(settings, At(11, 19), zone).Current; };
+            var displayStatus = Marshal.AllocHGlobal(24);
+            try
+            {
+                var guid = new Guid("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5").ToByteArray();
+                Marshal.Copy(guid, 0, displayStatus, guid.Length);
+                Marshal.WriteInt32(displayStatus, 16, sizeof(int));
+                Marshal.WriteInt32(displayStatus, 20, 0);
+                SendMessage(dispatcher.Handle, 0x0218, new IntPtr(0x8013), displayStatus);
+                SendMessage(dispatcher.Handle, 0x02B1, new IntPtr(7), IntPtr.Zero);
+                Check(checks == 0 && current == ThemeMode.Dark, "turning the display off or locking does not run the schedule");
+
+                Marshal.WriteInt32(displayStatus, 20, 1);
+                SendMessage(dispatcher.Handle, 0x0218, new IntPtr(0x8013), displayStatus);
+                Check(checks == 1 && current == ThemeMode.Light, "display on catches up after sleeping through the morning boundary");
+
+                current = ThemeMode.Dark;
+                SendMessage(dispatcher.Handle, 0x02B1, new IntPtr(8), IntPtr.Zero);
+                Check(checks == 2 && current == ThemeMode.Light, "session unlock catches up after sleeping through the morning boundary");
+            }
+            finally { Marshal.FreeHGlobal(displayStatus); }
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
