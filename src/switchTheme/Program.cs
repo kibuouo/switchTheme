@@ -183,7 +183,7 @@ namespace SwitchTheme
         }
         public void Manual(ThemeMode mode)
         {
-            theme.Apply(mode);
+            theme.Apply(mode, notifyIfUnchanged: true);
             PausedUntil = Active.Enabled ? (DateTimeOffset?)Scheduler.Evaluate(Active, DateTimeOffset.Now, TimeZoneInfo.Local).Next.At : null;
             Message = "Windows 已切换为" + (mode == ThemeMode.Light ? "浅色" : "深色") + "。";
             Refresh(true); ArmTimer();

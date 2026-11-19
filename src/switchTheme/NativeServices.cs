@@ -30,26 +30,41 @@ namespace SwitchTheme
     public sealed class WindowsTheme
     {
         public const string Personalize = @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+        private const uint WmSettingChange = 0x001A, WmThemeChanged = 0x031A;
+        private const uint AbortIfHung = 0x0002, NotificationTimeoutMs = 1500;
         private readonly NotificationQueue notifications;
         public WindowsTheme(Action<Exception> error)
         {
             notifications = new NotificationQueue(delegate {
-                var ownProcess = (uint)Process.GetCurrentProcess().Id;
-                EnumWindows(delegate(IntPtr window, IntPtr parameter) {
-                    uint owner; GetWindowThreadProcessId(window, out owner);
-                    // Our custom palette already refreshed from the registry. Avoid
-                    // needlessly rebuilding WinForms system-theme caches in this process.
-                    if (owner != ownProcess)
-                    { IntPtr ignored; SendMessageTimeout(window, 0x1a, IntPtr.Zero, "ImmersiveColorSet", 2, 1500, out ignored); }
-                    return true;
-                }, IntPtr.Zero);
+                using (var process = Process.GetCurrentProcess())
+                {
+                    var ownProcess = (uint)process.Id;
+                    // Refresh the taskbar before waiting on any unrelated window.
+                    var taskbar = FindWindow("Shell_TrayWnd", null);
+                    if (taskbar != IntPtr.Zero) NotifyWindow(taskbar);
+
+                    EnumWindows(delegate(IntPtr window, IntPtr parameter) {
+                        uint owner; GetWindowThreadProcessId(window, out owner);
+                        // Our custom palette is already refreshed from the registry.
+                        if (window != taskbar && owner != ownProcess) NotifyWindow(window);
+                        return true;
+                    }, IntPtr.Zero);
+                }
             }, error);
         }
+
+        private static void NotifyWindow(IntPtr window)
+        {
+            IntPtr ignored;
+            SendMessageTimeout(window, WmSettingChange, IntPtr.Zero, "ImmersiveColorSet", AbortIfHung, NotificationTimeoutMs, out ignored);
+            SendMessageTimeout(window, WmThemeChanged, IntPtr.Zero, null, AbortIfHung, NotificationTimeoutMs, out ignored);
+        }
+
         private static int ReadValue(string name)
         { using (var key = Registry.CurrentUser.OpenSubKey(Personalize)) { var value = key == null ? null : key.GetValue(name); return value is int ? (int)value : 1; } }
         public ThemeMode Read() { return ReadValue("AppsUseLightTheme") == 0 ? ThemeMode.Dark : ThemeMode.Light; }
         public ThemeMode ReadSystem() { return ReadValue("SystemUsesLightTheme") == 0 ? ThemeMode.Dark : ThemeMode.Light; }
-        public void Apply(ThemeMode mode)
+        public void Apply(ThemeMode mode, bool notifyIfUnchanged = false)
         {
             var value = mode == ThemeMode.Light ? 1 : 0; var changed = false;
             using (var key = Registry.CurrentUser.CreateSubKey(Personalize))
@@ -59,10 +74,12 @@ namespace SwitchTheme
                     if (!(current is int) || (int)current != value)
                     { key.SetValue(name, value, RegistryValueKind.DWord); changed = true; }
                 }
-            if (changed) notifications.Request();
+            if (changed || notifyIfUnchanged) notifications.Request();
         }
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, IntPtr wParam, string lParam, uint flags, uint timeout, out IntPtr result);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string windowName);
         private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
